@@ -1,0 +1,144 @@
+---
+- name: Preparar GNOME mínimo + CRD (x64) y autostart VS Code
+  hosts: all
+  become: true
+  vars:
+    target_user: ubuntu                      # pásalo por -e si es otro
+    crd_oauth_code: ""                       # pásalo por -e (OJO: caduca)
+    crd_redirect_url: "https://remotedesktop.google.com/_/oauthredirect"
+    crd_name: "{{ inventory_hostname }}"
+    vscode_deb_url: "https://update.code.visualstudio.com/latest/linux-deb-x64/stable"
+    chrome_deb_url: "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+    crd_deb_url: "https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb"
+    tmp_dir: "/tmp"
+    vscode_deb_path: "/tmp/vscode.deb"
+    chrome_deb_path: "/tmp/google-chrome.deb"
+    crd_deb_path: "/tmp/chrome-remote-desktop_current_amd64.deb"
+
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+  pre_tasks:
+    - name: Asegurar apt actualizado
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Upgrade de paquetes
+      ansible.builtin.apt:
+        upgrade: dist
+
+  tasks:
+    - name: Instalar GNOME mínimo (sin recommends)
+      ansible.builtin.apt:
+        name:
+          - ubuntu-session
+          - gnome-shell
+          - gnome-terminal
+          - nautilus
+          - dbus-x11
+          - policykit-1
+          - adwaita-icon-theme
+          - gsettings-desktop-schemas
+          - fonts-dejavu-core
+          - xserver-xorg-core
+        state: present
+        install_recommends: no
+
+    - name: Descargar CRD .deb a /tmp
+      ansible.builtin.get_url:
+        url: "{{ crd_deb_url }}"
+        dest: "{{ crd_deb_path }}"
+        mode: "0644"
+        force: yes
+
+    - name: Instalar Chrome Remote Desktop
+      ansible.builtin.apt:
+        deb: "{{ crd_deb_path }}"
+        force_apt_get: yes
+
+    - name: Configurar sesión GNOME para CRD
+      ansible.builtin.copy:
+        dest: /etc/chrome-remote-desktop-session
+        content: "exec /usr/bin/gnome-session --session=ubuntu\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Asegurar usuario en grupo chrome-remote-desktop
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        groups: chrome-remote-desktop
+        append: yes
+
+    - name: Vincular host a CRD (start-host) si hay código
+      ansible.builtin.command: >
+        /opt/google/chrome-remote-desktop/start-host
+        --code="{{ crd_oauth_code }}"
+        --redirect-url="{{ crd_redirect_url }}"
+        --name="{{ crd_name }}"
+      become_user: "{{ target_user }}"
+      environment:
+        DISPLAY: ""
+      when: crd_oauth_code | length > 0
+      register: crd_start
+      changed_when: "'Successfully started' in crd_start.stdout or crd_start.rc == 0"
+      failed_when: crd_start.rc not in [0]
+
+    - name: Reiniciar tras configurar CRD (igual que tu script)
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: crd_oauth_code | length > 0
+
+    # === Post-reboot: Chrome y VS Code ===
+
+    - name: Descargar Google Chrome .deb a /tmp
+      ansible.builtin.get_url:
+        url: "{{ chrome_deb_url }}"
+        dest: "{{ chrome_deb_path }}"
+        mode: "0644"
+        force: yes
+
+    - name: Instalar Google Chrome
+      ansible.builtin.apt:
+        deb: "{{ chrome_deb_path }}"
+        force_apt_get: yes
+
+    - name: Descargar VS Code .deb a /tmp
+      ansible.builtin.get_url:
+        url: "{{ vscode_deb_url }}"
+        dest: "{{ vscode_deb_path }}"
+        mode: "0644"
+        force: yes
+
+    - name: Instalar VS Code (no interactivo, acepta repo)
+      ansible.builtin.apt:
+        deb: "{{ vscode_deb_path }}"
+        force_apt_get: yes
+
+    - name: Crear carpeta autostart para {{ target_user }}
+      ansible.builtin.file:
+        path: "/home/{{ target_user }}/.config/autostart"
+        state: directory
+        owner: "{{ target_user }}"
+        group: "{{ target_user }}"
+        mode: "0755"
+
+    - name: Crear .desktop de VS Code en autostart
+      ansible.builtin.copy:
+        dest: "/home/{{ target_user }}/.config/autostart/vscode.desktop"
+        owner: "{{ target_user }}"
+        group: "{{ target_user }}"
+        mode: "0644"
+        content: |
+          [Desktop Entry]
+          Type=Application
+          Exec=code
+          Hidden=false
+          NoDisplay=false
+          X-GNOME-Autostart-enabled=true
+          Name=Visual Studio Code
+          Comment=Abrir VS Code al iniciar sesión
+
+  handlers: []
